@@ -1,24 +1,31 @@
 package org.example.server;
 
+import org.example.handler.HttpHandler;
+import org.example.handler.HttpRequest;
+import org.example.handler.HttpResponse;
+
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
 import java.nio.channels.AsynchronousServerSocketChannel;
 import java.nio.channels.AsynchronousSocketChannel;
-import java.util.Arrays;
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeoutException;
 
 public class Server {
     private final static int BUFFER_SIZE = 256;
     private AsynchronousServerSocketChannel server;
-    private final static String HEADERS =
-            "HTTP/1.1 200 OK\n" +
-            "Server: naive\n"+
-            "Content-Type: text/html\n"+
-            "Content-Length: %s\n"+
-            "Connection: close\n";
-    public void bootstrap(){
+
+    private final HttpHandler handler;
+
+    public Server(HttpHandler handler) {
+        this.handler = handler;
+    }
+
+    public void bootstrap() {
         try {
             server = AsynchronousServerSocketChannel.open();
             server.bind(new InetSocketAddress("127.0.0.1", 8088));
@@ -28,16 +35,19 @@ public class Server {
                 handleClient(future);
             }
         } catch (IOException e) {
-            throw new RuntimeException(e);
-        } catch (ExecutionException e) {
-            throw new RuntimeException(e);
+            e.printStackTrace();
         } catch (InterruptedException e) {
-            throw new RuntimeException(e);
+            e.printStackTrace();
+        } catch (ExecutionException e) {
+            e.printStackTrace();
+        } catch (TimeoutException e) {
+            e.printStackTrace();
         }
     }
 
-    private static void handleClient(Future<AsynchronousSocketChannel> future) throws InterruptedException, ExecutionException, IOException {
-        System.out.println("new client thread");
+    private void handleClient(Future<AsynchronousSocketChannel> future)
+            throws InterruptedException, ExecutionException, TimeoutException, IOException {
+        System.out.println("new client connection");
 
         AsynchronousSocketChannel clientChannel = future.get();
 
@@ -47,23 +57,46 @@ public class Server {
             boolean keepReading = true;
 
             while (keepReading) {
+                int readResult = clientChannel.read(buffer).get();
 
-                clientChannel.read(buffer).get();
+                keepReading = readResult == BUFFER_SIZE;
+                buffer.flip();
+                CharBuffer charBuffer = StandardCharsets.UTF_8.decode(buffer);
+                builder.append(charBuffer);
 
-                int position = buffer.position();
-                keepReading = position == BUFFER_SIZE;
-
-                byte[] array = keepReading
-                        ? buffer.array()
-                        : Arrays.copyOfRange(buffer.array(), 0, position);
-
-                builder.append(new String(array));
                 buffer.clear();
             }
 
-            String body = "<html><body><h1>Hello, naive</h1></body></html>";
-            String page = String.format(HEADERS, body.length()) + body;
-            ByteBuffer resp = ByteBuffer.wrap(page.getBytes());
+            HttpRequest request = new HttpRequest(builder.toString());
+            HttpResponse response = new HttpResponse();
+
+            if (handler != null) {
+                try {
+                    String body = this.handler.handle(request, response);
+
+                    if (body != null && !body.isBlank()) {
+                        if (response.getHeaders().get("Content-Type") == null) {
+                            response.addHeader("Content-Type", "text/html; charset=utf-8");
+                        }
+
+                        response.setBody(body);
+                    }
+                } catch (Exception e) {
+                    e.printStackTrace();
+
+                    response.setStatusCode(500);
+                    response.setStatus("Internal server error");
+                    response.addHeader("Content-Type", "text/html; charset=utf-8");
+                    response.setBody("<html><body><h1>Error happens</h1></body></html>");
+                }
+            } else {
+                response.setStatusCode(404);
+                response.setStatus("Not found");
+                response.addHeader("Content-Type", "text/html; charset=utf-8");
+                response.setBody("<html><body><h1>Resource not found</h1></body></html>");
+            }
+
+            ByteBuffer resp = ByteBuffer.wrap(response.getBytes());
             clientChannel.write(resp);
 
             clientChannel.close();
