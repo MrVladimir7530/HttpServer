@@ -1,0 +1,3 @@
+server.port = 8088
+threads = 16
+capacity = 10
