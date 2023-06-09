@@ -22,17 +22,17 @@ public class Server {
     private final static int BUFFER_SIZE = 256;
     private AsynchronousServerSocketChannel server;
 
-    private Map<String, HandlerPool<? extends HttpHandler>> handlerPoolMap = new HashMap<>();
+    private Map<String, BlockingQueue<HttpHandler>> handlerPoolMap = new HashMap<>();
     ExecutorService executorService = Executors.newFixedThreadPool(PropertyManager.getPropertyAsInteger("threads", 16));
 
 
-    Server() throws Exception {
+    public Server() throws Exception {
 
     }
 
     public void addHandler(String path, Class handlerClass) {
         int sizeHandlers = PropertyManager.getPropertyAsInteger("capacity", 10);
-        HandlerPool handlerPool = new HandlerPool<>(sizeHandlers);
+        BlockingQueue<HttpHandler> handlerPool = new ArrayBlockingQueue<>(sizeHandlers);
         for (int i = 0; i < sizeHandlers; i++) {
             HttpHandler handler = null;
             try {
@@ -109,17 +109,17 @@ public class Server {
                 HttpResponse response = new HttpResponse();
 
                 try {
-                    HandlerPool handlerPool = handlerPoolMap.get(request.getUrl());
+                    BlockingQueue<HttpHandler> handlerPool = handlerPoolMap.get(request.getUrl());
                     if (handlerPool == null) {
                         response.setStatusCode(404);
                         response.setStatus("Not found");
                         response.addHeader("Content-Type", "text/html; charset = utf-8");
                         response.setBody("<html><body><h1>Resource not found</h1></body></html>");
                         writeAndCloseChannel(clientChannel, response);
-                    } else {
-                        HttpHandler handler = (HttpHandler) handlerPool.poll();
-                        try {
 
+                    }
+                    else {
+                        HttpHandler handler = (HttpHandler) handlerPool.poll();
                             HttpMethod method = request.getMethod();
                             String body = null;
                             switch (method) {
@@ -135,7 +135,6 @@ public class Server {
                                 case DELETE:
                                     body = handler.doDelete(request, response);
                                     break;
-                                //todo дописать методы
                             }
                             handlerPool.put(handler);
                             if (body != null && !body.isBlank()) {
@@ -144,25 +143,55 @@ public class Server {
                                 }
                                 response.setBody(body);
                             }
-                        } catch (Exception e) {
-                            e.printStackTrace();
-                            response.setStatusCode(500);
-                            response.setStatus("Internal server error");
-                            response.addHeader("Content-Type", "text/html; charset = utf-8");
-                            response.setBody("<html><body><h1>Error happens</h1></body></html>");
-                        }
                     }
+
+                    Runnable task = createRunnable(clientChannel, request, response);
+                    executorService.submit(task);
                 } catch (Exception e) {
                     throw new RuntimeException(e);
                 }
-
-
                 ByteBuffer resp = ByteBuffer.wrap(response.getBytes());
                     clientChannel.write(resp);
                 }
 
         clientChannel.close();
     }
+
+    private Runnable createRunnable(AsynchronousSocketChannel clientChannel, HttpRequest request, HttpResponse response) {
+
+        Runnable task = () -> {
+            try {
+                String body = handlerWork(request, response);
+
+                if (body != null && !body.isBlank()) {
+                    if (response.getHeaders().get("Content-Type") == null) {
+                        response.addHeader("Content-Type", "text/html; charset=utf-8");
+                    }
+
+                    response.setBody(body);
+                }
+
+//                writeAndCloseChannel(clientChannel, response);
+
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        };
+        return task;
+    }
+    private String handlerWork(HttpRequest request, HttpResponse response) throws Exception {
+
+        HttpHandler handler = this.handlerPoolMap.get(request.getUrl()).take();
+
+        String body = handler.doGet(request, response);
+
+        BlockingQueue<HttpHandler> pool = this.handlerPoolMap.get(request.getUrl());
+
+        pool.add(handler);
+
+        return body;
+    }
+
     private void writeAndCloseChannel(AsynchronousSocketChannel clientChannel, HttpResponse response) throws IOException {
         ByteBuffer resp = ByteBuffer.wrap(response.getBytes());
         clientChannel.write(resp);
